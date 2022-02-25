@@ -56,7 +56,41 @@ class RealESRGANer():
         """Pre-process, such as pre-pad and mod pad, so that the images can be divisible
         """
         img = torch.from_numpy(np.transpose(img, (2, 0, 1))).float()
+        # Unsqueeze adds an extra dimension at the 'front', so basically this is where
+        # a 'batch' is created I think
         self.img = img.unsqueeze(0).to(self.device)
+        if self.half:
+            self.img = self.img.half()
+
+        # pre_pad
+        if self.pre_pad != 0:
+            self.img = F.pad(self.img, (0, self.pre_pad, 0, self.pre_pad), 'reflect')
+        # mod pad for divisible borders
+        if self.scale == 2:
+            self.mod_scale = 2
+        elif self.scale == 1:
+            self.mod_scale = 4
+        if self.mod_scale is not None:
+            self.mod_pad_h, self.mod_pad_w = 0, 0
+            _, _, h, w = self.img.size()
+            if (h % self.mod_scale != 0):
+                self.mod_pad_h = (self.mod_scale - h % self.mod_scale)
+            if (w % self.mod_scale != 0):
+                self.mod_pad_w = (self.mod_scale - w % self.mod_scale)
+            self.img = F.pad(self.img, (0, self.mod_pad_w, 0, self.mod_pad_h), 'reflect')
+
+    def pre_process_batch(self, images):
+        """Pre-process, such as pre-pad and mod pad, so that the images can be divisible
+        """
+        # img = torch.from_numpy(np.transpose(img, (2, 0, 1))).float()
+        # Keeping the batch dimension unchanged and then adding one to the other dims
+        # since there is the extra batch dimension already but preserving the order
+        images = torch.from_numpy(np.transpose(images, (0, 3, 1, 2))).float()
+
+        # Unsqueeze adds an extra dimension at the 'front', so basically this is where
+        # a 'batch' is created I think
+        # self.img = img.unsqueeze(0).to(self.device)
+        self.img = images.to(self.device)
         if self.half:
             self.img = self.img.half()
 
@@ -226,6 +260,57 @@ class RealESRGANer():
                     int(w_input * outscale),
                     int(h_input * outscale),
                 ), interpolation=cv2.INTER_LANCZOS4)
+
+        return output, img_mode
+
+    @torch.no_grad()
+    def enhance_batch(self, images, outscale=None, alpha_upsampler='realesrgan'):
+        img = images[0]
+        h_input, w_input = img.shape[0:2]
+        # img: numpy
+        images = images.astype(np.float32)
+        # Removed the image precision checking since I'm assuming we're dealing with
+        # images that don't go above 255
+        max_range = 255
+        images = images / max_range
+
+        # Removed checks for grayscale and RGBA images
+        img_mode = 'RGB'
+        # Removed BGR2RGB conversion as I'm assuming that we read the image in as
+        # RGB and didn't make any changes
+        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # ------------------- process image (without the alpha channel) ------------------- #
+        self.pre_process_batch(images)
+        if self.tile_size > 0:
+            self.tile_process()
+        else:
+            self.process()
+        output_img = self.post_process()
+        # Removed the squeeze since the batch dimension is meaningful here
+        # output_img = output_img.data.squeeze().float().cpu().clamp_(0, 1).numpy()
+        # output_img = np.transpose(output_img[[2, 1, 0], :, :], (1, 2, 0))
+        output_img = output_img.data.float().cpu().clamp_(0, 1).numpy()
+        output_img = np.transpose(output_img, (0,2,3,1))
+
+        # Removed BGR2Gray conversion
+        # Removed RGBA processing
+        # Removed 16 bit processing
+
+        output = (output_img * 255.0).round().astype(np.uint8)
+
+        # This block gets executed when you use the 4x model but request a different
+        # level of upsampling
+        if outscale is not None and outscale != float(self.scale):
+            output_list = []
+            for img in output:
+                resized_img = cv2.resize(
+                    img, (
+                        int(w_input * outscale),
+                        int(h_input * outscale),
+                    ), interpolation=cv2.INTER_LANCZOS4)
+                output_list.append(resized_img)
+            output = np.array(output_list)
 
         return output, img_mode
 
